@@ -2,7 +2,7 @@ name: Windows Build (.NET Framework 4.7.2)
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, deceive-updated ]
   pull_request:
     branches: [ master ]
   workflow_dispatch:
@@ -23,3 +23,9 @@ jobs:
 
       - name: Build solution
         run: msbuild Deceive.sln /p:Configuration=Release
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deceive-Release
+          path: Deceive/bin/Release/
