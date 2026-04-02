@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Security;
 using System.Net.Sockets;
-using System.Security.Cryptography.X509Certificates;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -53,8 +52,6 @@ internal class MainController : ApplicationContext
 
     private async Task ServeClientsAsync(TcpListener server, string chatHost, int chatPort)
     {
-        var cert = new X509Certificate2(Resources.Certificate);
-
         while (true)
         {
             try
@@ -64,8 +61,7 @@ internal class MainController : ApplicationContext
                 ShutdownToken = null;
 
                 var incoming = await server.AcceptTcpClientAsync();
-                var sslIncoming = new SslStream(incoming.GetStream());
-                await sslIncoming.AuthenticateAsServerAsync(cert);
+                var incomingStream = incoming.GetStream();
 
                 TcpClient outgoing;
                 while (true)
@@ -95,7 +91,7 @@ internal class MainController : ApplicationContext
                 var sslOutgoing = new SslStream(outgoing.GetStream());
                 await sslOutgoing.AuthenticateAsClientAsync(chatHost);
 
-                var proxiedConnection = new ProxiedConnection(this, sslIncoming, sslOutgoing);
+                var proxiedConnection = new ProxiedConnection(this, incomingStream, sslOutgoing);
                 proxiedConnection.Start();
                 proxiedConnection.ConnectionErrored += (_, _) =>
                 {

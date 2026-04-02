@@ -15,7 +15,7 @@ internal class ProxiedConnection
 {
     private MainController MainController { get; set; }
 
-    private SslStream Incoming { get; set; } = null!;
+    private Stream Incoming { get; set; } = null!;
     private SslStream Outgoing { get; set; } = null!;
     private bool Connected { get; set; } = true;
     private string LastPresence { get; set; } = null!; // we resend this if the state changes
@@ -25,7 +25,7 @@ internal class ProxiedConnection
 
     internal event EventHandler? ConnectionErrored;
 
-    internal ProxiedConnection(MainController main, SslStream incoming, SslStream outgoing)
+    internal ProxiedConnection(MainController main, Stream incoming, SslStream outgoing)
     {
         MainController = main;
         Incoming = incoming;
