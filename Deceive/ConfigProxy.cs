@@ -166,10 +166,6 @@ internal class ConfigProxy
             if (configObject?["chat.allow_bad_cert.enabled"] is not null)
                 configObject["chat.allow_bad_cert.enabled"] = true;
 
-            // Disable TLS for the client-to-proxy connection so we don't need a certificate.
-            // This bypasses SSL pinning since the client connects to our local proxy over plaintext.
-            configObject["chat.use_tls.enabled"] = false;
-
             modifiedContent = JsonSerializer.Serialize(configObject);
             Trace.WriteLine("MODIFIED CLIENTCONFIG: " + modifiedContent);
 

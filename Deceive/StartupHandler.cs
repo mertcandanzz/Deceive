@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -128,11 +129,14 @@ internal static class StartupHandler
             var x => throw new Exception("Unexpected LaunchGame: " + x)
         };
 
-        // Step 3: Start proxy web server for clientconfig
+        // Step 3: Ensure we have a trusted certificate for the chat proxy.
+        var certificate = SetupCertificate();
+
+        // Step 4: Start proxy web server for clientconfig
         var proxyServer = new ConfigProxy(port);
 
-        // Step 4: Launch Riot Client (+game)
-        var startArgs = new ProcessStartInfo { FileName = riotClientPath, Arguments = $"--client-config-url=\"http://127.0.0.1:{proxyServer.ConfigPort}\"" };
+        // Step 5: Launch Riot Client (+game)
+        var startArgs = new ProcessStartInfo { FileName = riotClientPath, Arguments = $"--client-config-url=\"http://127.0.0.1:{proxyServer.ConfigPort}\" --insecure" };
 
         if (launchProduct is not null)
             startArgs.Arguments += $" --launch-product={launchProduct} --launch-patchline={gamePatchline}";
@@ -153,24 +157,134 @@ internal static class StartupHandler
 
         var mainController = new MainController();
 
-        // Step 5: Get chat server and port for this player by listening to event from ConfigProxy.
+        // Step 6: Get chat server and port for this player by listening to event from ConfigProxy.
         var servingClients = false;
         proxyServer.PatchedChatServer += (_, args) =>
         {
             Trace.WriteLine($"The original chat server details were {args.ChatHost}:{args.ChatPort}");
 
-            // Step 6: Start serving incoming connections and proxy them!
+            // Step 7: Start serving incoming connections and proxy them!
             if (servingClients)
                 return;
             servingClients = true;
             if (args.ChatHost is not null)
             {
-                mainController.StartServingClients(listener, args.ChatHost, args.ChatPort);
+                mainController.StartServingClients(listener, args.ChatHost, args.ChatPort, certificate);
             }
         };
 
         // Loop infinitely and handle window messages/tray icon.
         Application.Run(mainController);
+    }
+
+    /// Sets up a trusted certificate for the chat proxy. On first run, generates a certificate
+    /// with SAN IP:127.0.0.1, installs it in Trusted Root CAs (prompts user), and saves the PFX.
+    /// On subsequent runs, loads the existing certificate.
+    private static X509Certificate2 SetupCertificate()
+    {
+        var certPfxPath = Path.Combine(Persistence.DataDir, "proxy-cert.pfx");
+        const string certPassword = "deceive";
+
+        // Try loading existing cert
+        if (File.Exists(certPfxPath))
+        {
+            try
+            {
+                var existing = new X509Certificate2(certPfxPath, certPassword);
+                if (existing.NotAfter > DateTime.Now.AddDays(30))
+                {
+                    Trace.WriteLine("Loaded existing proxy certificate: " + existing.Thumbprint);
+                    return existing;
+                }
+
+                Trace.WriteLine("Existing certificate is expiring soon, regenerating.");
+            }
+            catch (Exception e)
+            {
+                Trace.WriteLine("Failed to load existing certificate, regenerating: " + e.Message);
+            }
+        }
+
+        Trace.WriteLine("Generating new proxy certificate...");
+
+        // Write PowerShell script to temp file to avoid escaping issues
+        var scriptPath = Path.Combine(Persistence.DataDir, "gen-cert.ps1");
+        var cerExportPath = Path.Combine(Persistence.DataDir, "proxy-cert.cer");
+
+        File.WriteAllText(scriptPath,
+            "$ErrorActionPreference = 'Stop'\n" +
+            "$cert = New-SelfSignedCertificate -Subject 'CN=Deceive Proxy' " +
+            "-TextExtension @('2.5.29.17={text}IPAddress=127.0.0.1&DNS=127.0.0.1') " +
+            "-CertStoreLocation 'Cert:\\CurrentUser\\My' " +
+            "-NotAfter (Get-Date).AddYears(10) " +
+            "-KeyUsageProperty All " +
+            "-KeyUsage DigitalSignature,KeyEncipherment " +
+            "-KeyAlgorithm RSA -KeyLength 2048\n" +
+            "$pwd = ConvertTo-SecureString -String '" + certPassword + "' -AsPlainText -Force\n" +
+            "Export-PfxCertificate -Cert $cert -FilePath '" + certPfxPath.Replace("'", "''") + "' -Password $pwd | Out-Null\n" +
+            "Export-Certificate -Cert $cert -FilePath '" + cerExportPath.Replace("'", "''") + "' | Out-Null\n" +
+            "Write-Output $cert.Thumbprint\n"
+        );
+
+        var genProcess = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "powershell.exe",
+                Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + scriptPath + "\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }
+        };
+
+        genProcess.Start();
+        var output = genProcess.StandardOutput.ReadToEnd().Trim();
+        var errors = genProcess.StandardError.ReadToEnd().Trim();
+        genProcess.WaitForExit();
+
+        try { File.Delete(scriptPath); } catch { /* ignore */ }
+
+        if (genProcess.ExitCode != 0 || !File.Exists(certPfxPath))
+        {
+            Trace.WriteLine("Certificate generation failed: " + errors);
+            Trace.WriteLine("Falling back to embedded certificate.");
+            return new X509Certificate2(Properties.Resources.Certificate);
+        }
+
+        Trace.WriteLine("Generated certificate with thumbprint: " + output);
+
+        // Install in Trusted Root CAs so the Riot Client trusts it.
+        // certutil -user -addstore will show a Windows security dialog for user consent.
+        if (File.Exists(cerExportPath))
+        {
+            Trace.WriteLine("Installing certificate in Trusted Root CAs...");
+            var installProcess = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = "certutil.exe",
+                    Arguments = "-user -addstore Root \"" + cerExportPath + "\"",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true
+                }
+            };
+
+            installProcess.Start();
+            installProcess.StandardOutput.ReadToEnd();
+            installProcess.WaitForExit();
+
+            if (installProcess.ExitCode == 0)
+                Trace.WriteLine("Certificate installed in Trusted Root CAs.");
+            else
+                Trace.WriteLine("User declined or failed to install certificate in Trusted Root CAs.");
+
+            try { File.Delete(cerExportPath); } catch { /* ignore */ }
+        }
+
+        return new X509Certificate2(certPfxPath, certPassword);
     }
 
     private static void CurrentDomainOnUnhandledException(object sender, UnhandledExceptionEventArgs e)
