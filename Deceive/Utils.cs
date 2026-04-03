@@ -7,6 +7,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Reflection;
+using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading.Tasks;
@@ -94,7 +95,7 @@ internal static class Utils
     }
 
     // Return the currently running Riot Client process, or null if none are running.
-    public static Process GetRiotClientProcess() => Process.GetProcessesByName("RiotClientServices").FirstOrDefault();
+    public static Process? GetRiotClientProcess() => Process.GetProcessesByName("RiotClientServices").FirstOrDefault();
 
     // Checks if there is a running LCU/LoR/VALORANT/RC or Deceive instance.
     public static bool IsClientRunning() => GetProcesses().Any();
@@ -154,6 +155,38 @@ internal static class Utils
         }
         catch
         {
+            return null;
+        }
+    }
+    
+    // Returns a certificate for deceive-localhost.molenzwiebel.xyz, either from cache or by downloading
+    // the current one from the server. The returned certificate will be valid for at least 20 days.
+    public static async Task<X509Certificate2?> GetProxyCertificateAsync()
+    {
+        var cachedCert = Persistence.GetCachedCertificate();
+        if (cachedCert is not null && cachedCert.NotAfter > DateTime.Now.AddDays(20))
+        {
+            Trace.WriteLine($"Cached certificate is valid until {cachedCert.NotAfter}, using cached certificate.");
+            return cachedCert;
+        }
+
+        try
+        {
+            Trace.WriteLine("Cached certificate is missing or expiring soon, downloading new certificate.");
+            var httpClient = new HttpClient();
+            httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("Deceive", DeceiveVersion));
+
+            var response = await httpClient.GetAsync("https://mln.cx/deceive/localhost.pfx");
+            response.EnsureSuccessStatusCode();
+            var certBytes = await response.Content.ReadAsByteArrayAsync();
+            var cert = new X509Certificate2(certBytes);
+            Persistence.SetCachedCertificate(certBytes);
+            return cert;
+        }
+        catch (Exception ex)
+        {
+            // something went wrong, let's just return null and inform the user
+            Trace.WriteLine($"Failed to download certificate: {ex}");
             return null;
         }
     }

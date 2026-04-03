@@ -130,8 +130,25 @@ internal static class StartupHandler
 
         // Step 3: Start proxy web server for clientconfig
         var proxyServer = new ConfigProxy(port);
+        
+        // Step 4: fetch certificate for MITM
+        var serverCertificate = await Utils.GetProxyCertificateAsync();
+        if (serverCertificate is null)
+        {
+            MessageBox.Show(
+                "Deceive was unable to obtain a necessary security certificate for intercepting and modifying the chat connection. This normally happens when there's " +
+                "a problem with the server that provides the certificate, but it can also be caused by network issues on your end. Please check if there's a new version" +
+                " of Deceive available, check your network connection, or contact the creator through GitHub (https://github.com/molenzwiebel/Deceive) or Discord.",
+                DeceiveTitle,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error,
+                MessageBoxDefaultButton.Button1
+            );
 
-        // Step 4: Launch Riot Client (+game)
+            return;
+        }
+
+        // Step 5: Launch Riot Client (+game)
         var startArgs = new ProcessStartInfo { FileName = riotClientPath, Arguments = $"--client-config-url=\"http://127.0.0.1:{proxyServer.ConfigPort}\"" };
 
         if (launchProduct is not null)
@@ -153,19 +170,19 @@ internal static class StartupHandler
 
         var mainController = new MainController();
 
-        // Step 5: Get chat server and port for this player by listening to event from ConfigProxy.
+        // Step 6: Get chat server and port for this player by listening to event from ConfigProxy.
         var servingClients = false;
         proxyServer.PatchedChatServer += (_, args) =>
         {
             Trace.WriteLine($"The original chat server details were {args.ChatHost}:{args.ChatPort}");
 
-            // Step 6: Start serving incoming connections and proxy them!
+            // Step 7: Start serving incoming connections and proxy them!
             if (servingClients)
                 return;
             servingClients = true;
             if (args.ChatHost is not null)
             {
-                mainController.StartServingClients(listener, args.ChatHost, args.ChatPort);
+                mainController.StartServingClients(listener, serverCertificate, args.ChatHost, args.ChatPort);
             }
         };
 

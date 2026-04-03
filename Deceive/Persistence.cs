@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Security.Cryptography.X509Certificates;
 
 namespace Deceive;
 
@@ -9,6 +10,7 @@ internal static class Persistence
 
     private static readonly string UpdateVersionPath = Path.Combine(DataDir, "updateVersionPrompted");
     private static readonly string DefaultLaunchGamePath = Path.Combine(DataDir, "launchGame");
+    private static readonly string CachedCertPath = Path.Combine(DataDir, "localhostCert.pfx");
 
     static Persistence()
     {
@@ -35,4 +37,24 @@ internal static class Persistence
     }
 
     internal static void SetDefaultLaunchGame(LaunchGame game) => File.WriteAllText(DefaultLaunchGamePath, game.ToString());
+    
+    // Cached deceive-localhost.molenzwiebel.xyz certificate
+    internal static X509Certificate2? GetCachedCertificate()
+    {
+        if (!File.Exists(CachedCertPath))
+            return null;
+
+        try
+        {
+            var contents = File.ReadAllBytes(CachedCertPath);
+            return new X509Certificate2(contents);
+        }
+        catch
+        {
+            // If we fail to load the cert for any reason, just return null and grab a new one.
+            return null;
+        }
+    }
+    
+    internal static void SetCachedCertificate(byte[] certBytes) => File.WriteAllBytes(CachedCertPath, certBytes);
 }

@@ -4,14 +4,13 @@
     <OutputType>WinExe</OutputType>
     <UseWindowsForms>true</UseWindowsForms>
     <Nullable>enable</Nullable>
-    <AssemblyVersion>1.16.0.0</AssemblyVersion>
+    <AssemblyVersion>1.17.0.0</AssemblyVersion>
     <ApplicationIcon>Resources\deceive.ico</ApplicationIcon>
     <LangVersion>default</LangVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <GenerateResourceUsePreserializedResources>true</GenerateResourceUsePreserializedResources>
   </PropertyGroup>
   <ItemGroup>
-    <EmbeddedResource Include="Resources\server.pfx" />
     <EmbeddedResource Include="Resources\deceive.ico" />
   </ItemGroup>
   <ItemGroup>

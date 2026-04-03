@@ -46,15 +46,13 @@ internal class MainController : ApplicationContext
 
     private List<ProxiedConnection> Connections { get; } = new();
 
-    public void StartServingClients(TcpListener server, string chatHost, int chatPort)
+    public void StartServingClients(TcpListener server, X509Certificate2 serverCert, string chatHost, int chatPort)
     {
-        Task.Run(() => ServeClientsAsync(server, chatHost, chatPort));
+        Task.Run(() => ServeClientsAsync(server, serverCert, chatHost, chatPort));
     }
 
-    private async Task ServeClientsAsync(TcpListener server, string chatHost, int chatPort)
+    private async Task ServeClientsAsync(TcpListener server, X509Certificate2 serverCert, string chatHost, int chatPort)
     {
-        var cert = new X509Certificate2(Resources.Certificate);
-
         while (true)
         {
             try
@@ -65,7 +63,7 @@ internal class MainController : ApplicationContext
 
                 var incoming = await server.AcceptTcpClientAsync();
                 var sslIncoming = new SslStream(incoming.GetStream());
-                await sslIncoming.AuthenticateAsServerAsync(cert);
+                await sslIncoming.AuthenticateAsServerAsync(serverCert);
 
                 TcpClient outgoing;
                 while (true)

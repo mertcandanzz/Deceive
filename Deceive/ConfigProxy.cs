@@ -116,7 +116,7 @@ internal class ConfigProxy
             {
                 // Save fallback host
                 riotChatHost = configObject["chat.host"]!.GetValue<string>();
-                configObject["chat.host"] = "127.0.0.1";
+                configObject["chat.host"] = "deceive-localhost.molenzwiebel.xyz";
             }
 
             // Set chat port.
@@ -159,12 +159,8 @@ internal class ConfigProxy
                     }
                 }
 
-                affinities?.AsObject().Select(pair => pair.Key).ToList().ForEach(s => affinities[s] = "127.0.0.1");
+                affinities?.AsObject().Select(pair => pair.Key).ToList().ForEach(s => affinities[s] = "deceive-localhost.molenzwiebel.xyz");
             }
-
-            // Allow an invalid cert.
-            if (configObject?["chat.allow_bad_cert.enabled"] is not null)
-                configObject["chat.allow_bad_cert.enabled"] = true;
 
             modifiedContent = JsonSerializer.Serialize(configObject);
             Trace.WriteLine("MODIFIED CLIENTCONFIG: " + modifiedContent);
