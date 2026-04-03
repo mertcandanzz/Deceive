@@ -169,6 +169,37 @@ internal class MainController : ApplicationContext
         { Checked = Status.Equals("mobile") };
 
         var typeMenuItem = new ToolStripMenuItem("Status Type", null, ChatStatus, OfflineStatus, MobileStatus);
+        
+        var currentStartup = Persistence.GetStartupStatus();
+        var startupOnline = new ToolStripMenuItem("Online", null, (_, _) =>
+        {
+            Persistence.SetStartupStatus("chat");
+            UpdateTray();
+        })
+        { Checked = currentStartup == "chat" };
+
+        var startupOffline = new ToolStripMenuItem("Offline", null, (_, _) =>
+        {
+            Persistence.SetStartupStatus("offline");
+            UpdateTray();
+        })
+        { Checked = currentStartup == "offline" };
+
+        var startupMobile = new ToolStripMenuItem("Mobile", null, (_, _) =>
+        {
+            Persistence.SetStartupStatus("mobile");
+            UpdateTray();
+        })
+        { Checked = currentStartup == "mobile" };
+
+        var startupLast = new ToolStripMenuItem("Remember Last", null, (_, _) =>
+        {
+            Persistence.SetStartupStatus("last");
+            UpdateTray();
+        })
+        { Checked = currentStartup == "last" };
+
+        var startupStatusMenuItem = new ToolStripMenuItem("Default Status on Startup", null, startupOnline, startupOffline, startupMobile, startupLast);
 
         var restartWithDifferentGameItem = new ToolStripMenuItem("Restart and launch a different game", null, (_, _) =>
         {
@@ -216,10 +247,10 @@ internal class MainController : ApplicationContext
 
         TrayIcon.ContextMenuStrip.Items.AddRange(new ToolStripItem[]
         {
-            aboutMenuItem, EnabledMenuItem, typeMenuItem, mucMenuItem, sendTestMsg, restartWithDifferentGameItem, quitMenuItem
+            aboutMenuItem, EnabledMenuItem, typeMenuItem, startupStatusMenuItem, mucMenuItem, sendTestMsg, restartWithDifferentGameItem, quitMenuItem
         });
 #else
-        TrayIcon.ContextMenuStrip.Items.AddRange(new ToolStripItem[] { aboutMenuItem, EnabledMenuItem, typeMenuItem, mucMenuItem, restartWithDifferentGameItem, quitMenuItem });
+        TrayIcon.ContextMenuStrip.Items.AddRange(new ToolStripItem[] { aboutMenuItem, EnabledMenuItem, typeMenuItem, startupStatusMenuItem, mucMenuItem, restartWithDifferentGameItem, quitMenuItem });
 #endif
     }
 
@@ -303,10 +334,28 @@ internal class MainController : ApplicationContext
 
     private void LoadStatus()
     {
-        if (File.Exists(StatusFile))
-            Status = File.ReadAllText(StatusFile) == "mobile" ? "mobile" : "offline";
-        else
+        var startupStatus = Persistence.GetStartupStatus();
+
+        if (startupStatus is "chat" or "offline" or "mobile")
+        {
+            Status = startupStatus;
+            return;
+        }
+
+        if (!File.Exists(StatusFile))
+        {
             Status = "offline";
+            return;
+        }
+
+        // "last" or unrecognized: use the saved session status.
+        var saved = File.ReadAllText(StatusFile);
+        Status = saved switch
+        {
+            "chat" => "chat",
+            "mobile" => "mobile",
+            _ => "offline"
+        };
     }
 
     private async Task ShutdownIfNoReconnect()
