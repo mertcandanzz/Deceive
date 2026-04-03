@@ -1,9 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Net;
-using System.Net.Sockets;
-using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 
@@ -31,7 +28,6 @@ internal static class StartupHandler
         catch (Exception ex)
         {
             Trace.WriteLine(ex);
-            // Show some kind of message so that Deceive doesn't just disappear.
             MessageBox.Show(
                 "Deceive encountered an error and couldn't properly initialize itself. " +
                 "Please contact the creator through GitHub (https://github.com/molenzwiebel/Deceive) or Discord.\n\n" + ex,
@@ -80,16 +76,9 @@ internal static class StartupHandler
         // Step 0: Check for updates in the background.
         _ = Utils.CheckForUpdatesAsync();
 
-        // Step 1: Open a port for our chat proxy, so we can patch chat port into clientconfig.
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        Trace.WriteLine($"Chat proxy listening on port {port}");
-
-        // Step 2: Find the Riot Client.
+        // Step 1: Find the Riot Client.
         var riotClientPath = Utils.GetRiotClientPath();
 
-        // If the riot client doesn't exist, the user is either severely outdated or has a bugged install.
         if (riotClientPath is null)
         {
             MessageBox.Show(
@@ -119,6 +108,23 @@ internal static class StartupHandler
         if (game is LaunchGame.Prompt or LaunchGame.Auto)
             return;
 
+        // Warn about non-LoL games: LCU API approach only works for League of Legends.
+        if (game is not LaunchGame.LoL and not LaunchGame.RiotClient)
+        {
+            var warningResult = MessageBox.Show(
+                "Deceive currently only supports appearing offline in League of Legends.\n\n" +
+                "For " + game + ", the offline feature will not work due to Riot's recent SSL changes.\n\n" +
+                "Do you want to launch the game anyway?",
+                DeceiveTitle,
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button1
+            );
+
+            if (warningResult is not DialogResult.Yes)
+                return;
+        }
+
         var launchProduct = game switch
         {
             LaunchGame.LoL => "league_of_legends",
@@ -129,17 +135,11 @@ internal static class StartupHandler
             var x => throw new Exception("Unexpected LaunchGame: " + x)
         };
 
-        // Step 3: Ensure we have a trusted certificate for the chat proxy.
-        var certificate = SetupCertificate();
-
-        // Step 4: Start proxy web server for clientconfig
-        var proxyServer = new ConfigProxy(port);
-
-        // Step 5: Launch Riot Client (+game)
-        var startArgs = new ProcessStartInfo { FileName = riotClientPath, Arguments = $"--client-config-url=\"http://127.0.0.1:{proxyServer.ConfigPort}\" --insecure" };
+        // Step 2: Launch Riot Client normally (no config proxy, no TLS interception).
+        var startArgs = new ProcessStartInfo { FileName = riotClientPath, Arguments = "" };
 
         if (launchProduct is not null)
-            startArgs.Arguments += $" --launch-product={launchProduct} --launch-patchline={gamePatchline}";
+            startArgs.Arguments = $"--launch-product={launchProduct} --launch-patchline={gamePatchline}";
 
         if (riotClientParams is not null)
             startArgs.Arguments += $" {riotClientParams}";
@@ -147,149 +147,21 @@ internal static class StartupHandler
         if (gameParams is not null)
             startArgs.Arguments += $" -- {gameParams}";
 
-        Trace.WriteLine($"About to launch Riot Client with parameters:\n{startArgs.Arguments}");
+        Trace.WriteLine($"Launching Riot Client: {startArgs.Arguments}");
         var riotClient = Process.Start(startArgs);
-        // Kill Deceive when Riot Client has exited, so no ghost Deceive exists.
         if (riotClient is not null)
-        {
             ListenToRiotClientExit(riotClient);
-        }
 
+        // Step 3: Start the main controller (tray icon + LCU presence monitoring).
         var mainController = new MainController();
+        mainController.StartMonitoring();
 
-        // Step 6: Get chat server and port for this player by listening to event from ConfigProxy.
-        var servingClients = false;
-        proxyServer.PatchedChatServer += (_, args) =>
-        {
-            Trace.WriteLine($"The original chat server details were {args.ChatHost}:{args.ChatPort}");
-
-            // Step 7: Start serving incoming connections and proxy them!
-            if (servingClients)
-                return;
-            servingClients = true;
-            if (args.ChatHost is not null)
-            {
-                mainController.StartServingClients(listener, args.ChatHost, args.ChatPort, certificate);
-            }
-        };
-
-        // Loop infinitely and handle window messages/tray icon.
+        // Run the Windows message loop.
         Application.Run(mainController);
-    }
-
-    /// Sets up a trusted certificate for the chat proxy. On first run, generates a certificate
-    /// with SAN IP:127.0.0.1, installs it in Trusted Root CAs (prompts user), and saves the PFX.
-    /// On subsequent runs, loads the existing certificate.
-    private static X509Certificate2 SetupCertificate()
-    {
-        var certPfxPath = Path.Combine(Persistence.DataDir, "proxy-cert.pfx");
-        const string certPassword = "deceive";
-
-        // Try loading existing cert
-        if (File.Exists(certPfxPath))
-        {
-            try
-            {
-                var existing = new X509Certificate2(certPfxPath, certPassword);
-                if (existing.NotAfter > DateTime.Now.AddDays(30))
-                {
-                    Trace.WriteLine("Loaded existing proxy certificate: " + existing.Thumbprint);
-                    return existing;
-                }
-
-                Trace.WriteLine("Existing certificate is expiring soon, regenerating.");
-            }
-            catch (Exception e)
-            {
-                Trace.WriteLine("Failed to load existing certificate, regenerating: " + e.Message);
-            }
-        }
-
-        Trace.WriteLine("Generating new proxy certificate...");
-
-        // Write PowerShell script to temp file to avoid escaping issues
-        var scriptPath = Path.Combine(Persistence.DataDir, "gen-cert.ps1");
-        var cerExportPath = Path.Combine(Persistence.DataDir, "proxy-cert.cer");
-
-        File.WriteAllText(scriptPath,
-            "$ErrorActionPreference = 'Stop'\n" +
-            "$cert = New-SelfSignedCertificate -Subject 'CN=Deceive Proxy' " +
-            "-TextExtension @('2.5.29.17={text}IPAddress=127.0.0.1&DNS=127.0.0.1') " +
-            "-CertStoreLocation 'Cert:\\CurrentUser\\My' " +
-            "-NotAfter (Get-Date).AddYears(10) " +
-            "-KeyUsageProperty All " +
-            "-KeyUsage DigitalSignature,KeyEncipherment " +
-            "-KeyAlgorithm RSA -KeyLength 2048\n" +
-            "$pwd = ConvertTo-SecureString -String '" + certPassword + "' -AsPlainText -Force\n" +
-            "Export-PfxCertificate -Cert $cert -FilePath '" + certPfxPath.Replace("'", "''") + "' -Password $pwd | Out-Null\n" +
-            "Export-Certificate -Cert $cert -FilePath '" + cerExportPath.Replace("'", "''") + "' | Out-Null\n" +
-            "Write-Output $cert.Thumbprint\n"
-        );
-
-        var genProcess = new Process
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = "powershell.exe",
-                Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + scriptPath + "\"",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-
-        genProcess.Start();
-        var output = genProcess.StandardOutput.ReadToEnd().Trim();
-        var errors = genProcess.StandardError.ReadToEnd().Trim();
-        genProcess.WaitForExit();
-
-        try { File.Delete(scriptPath); } catch { /* ignore */ }
-
-        if (genProcess.ExitCode != 0 || !File.Exists(certPfxPath))
-        {
-            Trace.WriteLine("Certificate generation failed: " + errors);
-            Trace.WriteLine("Falling back to embedded certificate.");
-            return new X509Certificate2(Properties.Resources.Certificate);
-        }
-
-        Trace.WriteLine("Generated certificate with thumbprint: " + output);
-
-        // Install in Trusted Root CAs so the Riot Client trusts it.
-        // certutil -user -addstore will show a Windows security dialog for user consent.
-        if (File.Exists(cerExportPath))
-        {
-            Trace.WriteLine("Installing certificate in Trusted Root CAs...");
-            var installProcess = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    FileName = "certutil.exe",
-                    Arguments = "-user -addstore Root \"" + cerExportPath + "\"",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true
-                }
-            };
-
-            installProcess.Start();
-            installProcess.StandardOutput.ReadToEnd();
-            installProcess.WaitForExit();
-
-            if (installProcess.ExitCode == 0)
-                Trace.WriteLine("Certificate installed in Trusted Root CAs.");
-            else
-                Trace.WriteLine("User declined or failed to install certificate in Trusted Root CAs.");
-
-            try { File.Delete(cerExportPath); } catch { /* ignore */ }
-        }
-
-        return new X509Certificate2(certPfxPath, certPassword);
     }
 
     private static void CurrentDomainOnUnhandledException(object sender, UnhandledExceptionEventArgs e)
     {
-        // Log all unhandled exceptions
         Trace.WriteLine(e.ExceptionObject as Exception);
         Trace.WriteLine(Environment.StackTrace);
     }

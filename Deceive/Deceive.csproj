@@ -15,6 +15,10 @@
     <EmbeddedResource Include="Resources\deceive.ico" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Remove="ConfigProxy.cs" />
+    <Compile Remove="ProxiedConnection.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Costura.Fody" Version="5.7.0">
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>

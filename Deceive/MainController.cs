@@ -1,15 +1,10 @@
 using System;
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Net.Security;
-using System.Net.Sockets;
-using System.Security.Cryptography.X509Certificates;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using System.Xml;
-using System.Xml.Linq;
 using Deceive.Properties;
 
 namespace Deceive;
@@ -18,12 +13,16 @@ internal class MainController : ApplicationContext
 {
     internal MainController()
     {
+        // Accept self-signed certs for LCU API (localhost only).
+        ServicePointManager.ServerCertificateValidationCallback = (_, _, _, _) => true;
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+
         TrayIcon = new NotifyIcon
         {
             Icon = Resources.DeceiveIcon,
             Visible = true,
             BalloonTipTitle = StartupHandler.DeceiveTitle,
-            BalloonTipText = "Deceive is currently masking your status. Right-click the tray icon for more options."
+            BalloonTipText = "Deceive is starting. Waiting for League client..."
         };
         TrayIcon.ShowBalloonTip(5000);
 
@@ -35,118 +34,119 @@ internal class MainController : ApplicationContext
     public bool Enabled { get; set; } = true;
     public string Status { get; set; } = null!;
     private string StatusFile { get; } = Path.Combine(Persistence.DataDir, "status");
-    public bool ConnectToMuc { get; set; } = true;
-    private bool SentIntroductionText { get; set; } = false;
-    private CancellationTokenSource? ShutdownToken { get; set; } = null;
+    private LcuClient? LcuClient { get; set; }
+    private CancellationTokenSource MonitorCts { get; } = new();
+    private bool Connected { get; set; }
 
     private ToolStripMenuItem EnabledMenuItem { get; set; } = null!;
     private ToolStripMenuItem ChatStatus { get; set; } = null!;
     private ToolStripMenuItem OfflineStatus { get; set; } = null!;
     private ToolStripMenuItem MobileStatus { get; set; } = null!;
 
-    private List<ProxiedConnection> Connections { get; } = new();
-
-    public void StartServingClients(TcpListener server, string chatHost, int chatPort, X509Certificate2 certificate)
+    /// <summary>
+    /// Starts the background loop that detects the League client and keeps presence overridden.
+    /// </summary>
+    internal void StartMonitoring()
     {
-        Task.Run(() => ServeClientsAsync(server, chatHost, chatPort, certificate));
+        Task.Run(MonitorLoopAsync);
     }
 
-    private async Task ServeClientsAsync(TcpListener server, string chatHost, int chatPort, X509Certificate2 cert)
+    private async Task MonitorLoopAsync()
     {
-        while (true)
+        while (!MonitorCts.IsCancellationRequested)
         {
             try
             {
-                // no need to shutdown, we received a new request
-                ShutdownToken?.Cancel();
-                ShutdownToken = null;
-
-                var incoming = await server.AcceptTcpClientAsync();
-                var sslIncoming = new SslStream(incoming.GetStream());
-                await sslIncoming.AuthenticateAsServerAsync(cert);
-
-                TcpClient outgoing;
-                while (true)
+                if (LcuClient == null)
                 {
-                    try
+                    var client = LcuClient.TryCreate();
+                    if (client != null)
                     {
-                        outgoing = new TcpClient(chatHost, chatPort);
-                        break;
-                    }
-                    catch (SocketException e)
-                    {
-                        Trace.WriteLine(e);
-                        var result = MessageBox.Show(
-                            "Unable to connect to the chat server. Please check your internet connection. " +
-                            "If this issue persists and you can connect to chat normally without Deceive, " +
-                            "please file a bug report through GitHub (https://github.com/molenzwiebel/Deceive) or Discord.",
-                            StartupHandler.DeceiveTitle,
-                            MessageBoxButtons.RetryCancel,
-                            MessageBoxIcon.Error,
-                            MessageBoxDefaultButton.Button1
-                        );
-                        if (result == DialogResult.Cancel)
-                            Environment.Exit(0);
+                        LcuClient = client;
+                        Connected = true;
+
+                        Trace.WriteLine("LCU connected. Setting initial presence.");
+
+                        if (Enabled)
+                            await client.SetAvailabilityAsync(Status);
+
+                        TrayIcon.BalloonTipText = "Deceive is active! You are appearing " + Status + ".";
+                        TrayIcon.ShowBalloonTip(3000);
                     }
                 }
-
-                var sslOutgoing = new SslStream(outgoing.GetStream());
-                await sslOutgoing.AuthenticateAsClientAsync(chatHost);
-
-                var proxiedConnection = new ProxiedConnection(this, sslIncoming, sslOutgoing);
-                proxiedConnection.Start();
-                proxiedConnection.ConnectionErrored += (_, _) =>
+                else
                 {
-                    Trace.WriteLine("Disconnected incoming connection.");
-                    Connections.Remove(proxiedConnection);
-
-                    if (Connections.Count == 0)
+                    if (!await LcuClient.IsAliveAsync())
                     {
-                        Task.Run(ShutdownIfNoReconnect);
+                        Trace.WriteLine("LCU disconnected. Waiting for reconnect...");
+                        LcuClient.Dispose();
+                        LcuClient = null;
+                        Connected = false;
                     }
-                };
-                Connections.Add(proxiedConnection);
-
-                if (!SentIntroductionText)
-                {
-                    SentIntroductionText = true;
-                    _ = Task.Run(async () =>
+                    else if (Enabled)
                     {
-                        await Task.Delay(10_000);
-                        await SendIntroductionTextAsync();
-                    });
+                        // Continuously re-apply presence override. Game events (queue, champ select,
+                        // in-game) change presence, so we keep pushing our desired status.
+                        await LcuClient.SetAvailabilityAsync(Status);
+                    }
                 }
-            } catch (Exception e)
+            }
+            catch (Exception e)
             {
-                Trace.WriteLine("Failed to handle incoming connection.");
-                Trace.WriteLine(e);
+                Trace.WriteLine("Monitor loop error: " + e.Message);
+            }
+
+            try
+            {
+                await Task.Delay(2000, MonitorCts.Token);
+            }
+            catch (TaskCanceledException)
+            {
+                break;
             }
         }
+    }
+
+    private async Task ApplyStatusAsync(string newStatus)
+    {
+        Status = newStatus;
+        SaveStatus();
+
+        if (LcuClient != null && Enabled)
+            await LcuClient.SetAvailabilityAsync(newStatus);
+
+        var message = newStatus == "chat"
+            ? "You are now appearing online."
+            : "You are now appearing " + newStatus + ".";
+
+        TrayIcon.BalloonTipText = message;
+        TrayIcon.ShowBalloonTip(2000);
     }
 
     private void UpdateTray()
     {
         var aboutMenuItem = new ToolStripMenuItem(StartupHandler.DeceiveTitle) { Enabled = false };
 
+        var connectionText = Connected ? "Connected to League client" : "Waiting for League client...";
+        var connectionMenuItem = new ToolStripMenuItem(connectionText) { Enabled = false };
+
         EnabledMenuItem = new ToolStripMenuItem("Enabled", null, async (_, _) =>
         {
             Enabled = !Enabled;
-            await UpdateStatusAsync(Enabled ? Status : "chat");
-            await SendMessageFromFakePlayerAsync(Enabled ? "Deceive is now enabled." : "Deceive is now disabled.");
+            if (LcuClient != null)
+                await LcuClient.SetAvailabilityAsync(Enabled ? Status : "chat");
+
+            TrayIcon.BalloonTipText = Enabled
+                ? "Deceive enabled. Appearing " + Status + "."
+                : "Deceive disabled. Appearing online.";
+            TrayIcon.ShowBalloonTip(2000);
             UpdateTray();
         })
         { Checked = Enabled };
 
-        var mucMenuItem = new ToolStripMenuItem("Enable lobby chat", null, (_, _) =>
-        {
-            ConnectToMuc = !ConnectToMuc;
-            UpdateTray();
-        })
-        { Checked = ConnectToMuc };
-
         ChatStatus = new ToolStripMenuItem("Online", null, async (_, _) =>
         {
-            await UpdateStatusAsync(Status = "chat");
+            await ApplyStatusAsync("chat");
             Enabled = true;
             UpdateTray();
         })
@@ -154,7 +154,7 @@ internal class MainController : ApplicationContext
 
         OfflineStatus = new ToolStripMenuItem("Offline", null, async (_, _) =>
         {
-            await UpdateStatusAsync(Status = "offline");
+            await ApplyStatusAsync("offline");
             Enabled = true;
             UpdateTray();
         })
@@ -162,7 +162,7 @@ internal class MainController : ApplicationContext
 
         MobileStatus = new ToolStripMenuItem("Mobile", null, async (_, _) =>
         {
-            await UpdateStatusAsync(Status = "mobile");
+            await ApplyStatusAsync("mobile");
             Enabled = true;
             UpdateTray();
         })
@@ -170,7 +170,7 @@ internal class MainController : ApplicationContext
 
         var typeMenuItem = new ToolStripMenuItem("Status Type", null, ChatStatus, OfflineStatus, MobileStatus);
 
-        var restartWithDifferentGameItem = new ToolStripMenuItem("Restart and launch a different game", null, (_, _) =>
+        var restartItem = new ToolStripMenuItem("Restart and launch a different game", null, (_, _) =>
         {
             var result = MessageBox.Show(
                 "Restart Deceive to launch a different game? This will also stop related games if they are running.",
@@ -183,9 +183,7 @@ internal class MainController : ApplicationContext
             if (result is not DialogResult.Yes)
                 return;
 
-            Utils.KillProcesses();
-            Thread.Sleep(2000);
-
+            Shutdown();
             Persistence.SetDefaultLaunchGame(LaunchGame.Prompt);
             Process.Start(Application.ExecutablePath);
             Environment.Exit(0);
@@ -204,101 +202,29 @@ internal class MainController : ApplicationContext
             if (result is not DialogResult.Yes)
                 return;
 
-            Utils.KillProcesses();
-            SaveStatus();
+            Shutdown();
             Application.Exit();
         });
 
         TrayIcon.ContextMenuStrip = new ContextMenuStrip();
-
-#if DEBUG
-        var sendTestMsg = new ToolStripMenuItem("Send message", null, async (_, _) => { await SendMessageFromFakePlayerAsync("Test"); });
-
         TrayIcon.ContextMenuStrip.Items.AddRange(new ToolStripItem[]
         {
-            aboutMenuItem, EnabledMenuItem, typeMenuItem, mucMenuItem, sendTestMsg, restartWithDifferentGameItem, quitMenuItem
+            aboutMenuItem, connectionMenuItem, EnabledMenuItem, typeMenuItem, restartItem, quitMenuItem
         });
-#else
-        TrayIcon.ContextMenuStrip.Items.AddRange(new ToolStripItem[] { aboutMenuItem, EnabledMenuItem, typeMenuItem, mucMenuItem, restartWithDifferentGameItem, quitMenuItem });
-#endif
     }
 
-    public async Task HandleChatMessage(string content)
+    private void Shutdown()
     {
-        if (content.ToLower().Contains("offline"))
+        MonitorCts.Cancel();
+        // Restore normal presence before killing processes.
+        if (LcuClient != null)
         {
-            if (!Enabled)
-                await SendMessageFromFakePlayerAsync("Deceive is now enabled.");
-            OfflineStatus.PerformClick();
+            try { LcuClient.SetAvailabilityAsync("chat").Wait(2000); }
+            catch { /* best effort */ }
+            LcuClient.Dispose();
         }
-        else if (content.ToLower().Contains("mobile"))
-        {
-            if (!Enabled)
-                await SendMessageFromFakePlayerAsync("Deceive is now enabled.");
-            MobileStatus.PerformClick();
-        }
-        else if (content.ToLower().Contains("online"))
-        {
-            if (!Enabled)
-                await SendMessageFromFakePlayerAsync("Deceive is now enabled.");
-            ChatStatus.PerformClick();
-        }
-        else if (content.ToLower().Contains("enable"))
-        {
-            if (Enabled)
-                await SendMessageFromFakePlayerAsync("Deceive is already enabled.");
-            else
-                EnabledMenuItem.PerformClick();
-        }
-        else if (content.ToLower().Contains("disable"))
-        {
-            if (!Enabled)
-                await SendMessageFromFakePlayerAsync("Deceive is already disabled.");
-            else
-                EnabledMenuItem.PerformClick();
-        }
-        else if (content.ToLower().Contains("status"))
-        {
-            if (Status == "chat")
-                await SendMessageFromFakePlayerAsync("You are appearing online.");
-            else
-                await SendMessageFromFakePlayerAsync("You are appearing " + Status + ".");
-        }
-        else if (content.ToLower().Contains("help"))
-        {
-            await SendMessageFromFakePlayerAsync("You can send the following messages to quickly change Deceive settings: online/offline/mobile/enable/disable/status");
-        }
-    }
-
-    private async Task SendIntroductionTextAsync()
-    {
-        SentIntroductionText = true;
-        await SendMessageFromFakePlayerAsync("Welcome! Deceive is running and you are currently appearing " + Status +
-                                             ". Despite what the game client may indicate, you are appearing offline to your friends unless you manually disable Deceive.");
-        await Task.Delay(200);
-        await SendMessageFromFakePlayerAsync(
-            "If you want to invite others while being offline, you may need to disable Deceive for them to accept. You can enable Deceive again as soon as they are in your lobby.");
-        await Task.Delay(200);
-        await SendMessageFromFakePlayerAsync("To enable or disable Deceive, or to configure other settings, find Deceive in your tray icons.");
-        await Task.Delay(200);
-        await SendMessageFromFakePlayerAsync("Have fun!");
-    }
-
-    private async Task SendMessageFromFakePlayerAsync(string message)
-    {
-        foreach (var connection in Connections)
-            await connection.SendMessageFromFakePlayerAsync(message);
-    }
-
-    private async Task UpdateStatusAsync(string newStatus)
-    {
-        foreach (var connection in Connections)
-            await connection.UpdateStatusAsync(newStatus);
-
-        if (newStatus == "chat")
-            await SendMessageFromFakePlayerAsync("You are now appearing online.");
-        else
-            await SendMessageFromFakePlayerAsync("You are now appearing " + newStatus + ".");
+        SaveStatus();
+        Utils.KillProcesses();
     }
 
     private void LoadStatus()
@@ -307,16 +233,6 @@ internal class MainController : ApplicationContext
             Status = File.ReadAllText(StatusFile) == "mobile" ? "mobile" : "offline";
         else
             Status = "offline";
-    }
-
-    private async Task ShutdownIfNoReconnect()
-    {
-        if (ShutdownToken == null)
-            ShutdownToken = new CancellationTokenSource();
-        await Task.Delay(60_000, ShutdownToken.Token);
-
-        Trace.WriteLine("Received no new connections after 60s, shutting down.");
-        Environment.Exit(0);
     }
 
     private void SaveStatus() => File.WriteAllText(StatusFile, Status);
