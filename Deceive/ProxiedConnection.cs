@@ -23,6 +23,7 @@ internal class ProxiedConnection
     private bool SentFakePlayerPresence { get; set; } = false;
     private string? ValorantVersion { get; set; } = null;
     private MemoryStream? RosterBuffer { get; set; } = null;
+    private string PresenceBuffer { get; set; } = "";
 
     internal event EventHandler? ConnectionErrored;
 
@@ -146,9 +147,10 @@ internal class ProxiedConnection
                 }
 
                 // Observe friend presences (for status change notifications) without altering the
-                // forwarded data. Best-effort: malformed/partial chunks are simply ignored.
-                if (content.Contains("<presence"))
-                    MainController.HandleFriendPresenceContent(content);
+                // forwarded data. Presences can span multiple reads (especially the burst at login),
+                // so they are reassembled into complete stanzas before being parsed.
+                if (content.Contains("<presence") || PresenceBuffer.Length > 0)
+                    ObserveFriendPresence(content);
             } while (byteCount != 0 && Connected);
         }
         catch (Exception e)
@@ -160,6 +162,63 @@ internal class ProxiedConnection
         {
             Trace.WriteLine("Outgoing closed.");
             OnConnectionErrored();
+        }
+    }
+
+    // Reassembles the (possibly fragmented) server-to-client stream into complete <presence>
+    // stanzas and hands each one to the controller. Any trailing partial stanza is kept in the
+    // buffer for the next read.
+    private void ObserveFriendPresence(string content)
+    {
+        PresenceBuffer += content;
+        if (PresenceBuffer.Length > 4 * 1024 * 1024)
+        {
+            // Runaway guard: a presence stanza should never be this large.
+            PresenceBuffer = "";
+            return;
+        }
+
+        var searchStart = 0;
+        while (true)
+        {
+            var open = PresenceBuffer.IndexOf("<presence", searchStart, StringComparison.Ordinal);
+            if (open < 0)
+            {
+                // Keep a trailing fragment only if it could be the start of "<presence".
+                var lt = PresenceBuffer.LastIndexOf('<');
+                var tail = lt >= 0 ? PresenceBuffer.Substring(lt) : "";
+                PresenceBuffer = "<presence".StartsWith(tail, StringComparison.Ordinal) ? tail : "";
+                return;
+            }
+
+            var tagEnd = PresenceBuffer.IndexOf('>', open);
+            if (tagEnd < 0)
+            {
+                PresenceBuffer = PresenceBuffer.Substring(open); // incomplete start tag
+                return;
+            }
+
+            int stanzaEnd;
+            if (PresenceBuffer[tagEnd - 1] == '/')
+            {
+                stanzaEnd = tagEnd + 1; // self-closing <presence .../>
+            }
+            else
+            {
+                const string closeTag = "</presence>";
+                var close = PresenceBuffer.IndexOf(closeTag, tagEnd, StringComparison.Ordinal);
+                if (close < 0)
+                {
+                    PresenceBuffer = PresenceBuffer.Substring(open); // stanza not complete yet
+                    return;
+                }
+
+                stanzaEnd = close + closeTag.Length;
+            }
+
+            var stanza = PresenceBuffer.Substring(open, stanzaEnd - open);
+            MainController.HandleFriendPresenceContent(stanza);
+            searchStart = stanzaEnd;
         }
     }
 
