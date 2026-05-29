@@ -486,9 +486,23 @@ internal class MainController : ApplicationContext
     // we can resolve incoming friend presences (which only carry the puuid) to a readable Riot ID.
     internal void HandleRosterContent(string content)
     {
+        // Extract just the <query>...</query> element. The buffered content also contains the
+        // enclosing (and unclosed, when split) <iq> wrapper plus any trailing stanzas, which would
+        // otherwise make the document fail to parse.
+        const string openMarker = "<query xmlns='jabber:iq:riotgames:roster'>";
+        const string closeMarker = "</query>";
+        var start = content.IndexOf(openMarker, StringComparison.Ordinal);
+        if (start < 0)
+            return;
+        var end = content.IndexOf(closeMarker, start, StringComparison.Ordinal);
+        if (end < 0)
+            return;
+        var queryXml = content.Substring(start, end - start + closeMarker.Length);
+
         try
         {
-            var xml = XDocument.Load(new StringReader("<xml>" + content + "</xml>"));
+            var xml = XDocument.Load(new StringReader("<xml>" + queryXml + "</xml>"));
+            var count = 0;
             foreach (var item in xml.Descendants().Where(element => element.Name.LocalName == "item"))
             {
                 var jid = item.Attribute("jid")?.Value;
@@ -505,7 +519,10 @@ internal class MainController : ApplicationContext
 
                 lock (FriendLock)
                     FriendNamesByPuuid[puuid] = riotId;
+                count++;
             }
+
+            Trace.WriteLine($"Parsed {count} friends from roster for friend tracking.");
         }
         catch (Exception e)
         {

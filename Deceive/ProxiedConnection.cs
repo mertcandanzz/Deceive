@@ -22,6 +22,7 @@ internal class ProxiedConnection
     private bool InsertedFakePlayer { get; set; } = false;
     private bool SentFakePlayerPresence { get; set; } = false;
     private string? ValorantVersion { get; set; } = null;
+    private MemoryStream? RosterBuffer { get; set; } = null;
 
     internal event EventHandler? ConnectionErrored;
 
@@ -101,11 +102,31 @@ internal class ProxiedConnection
 
                 // Insert fake player into roster
                 const string roster = "<query xmlns='jabber:iq:riotgames:roster'>";
+
+                // Capture the roster for friend tracking. It can span multiple reads, so we buffer
+                // the raw bytes (decoding per-chunk would corrupt multi-byte characters split across
+                // a read boundary) until the closing </query> arrives, then decode it all at once.
+                if (RosterBuffer is null && content.Contains(roster))
+                    RosterBuffer = new MemoryStream();
+                if (RosterBuffer is not null)
+                {
+                    RosterBuffer.Write(bytes, 0, byteCount);
+                    var buffered = Encoding.UTF8.GetString(RosterBuffer.ToArray());
+                    var openIndex = buffered.IndexOf(roster, StringComparison.Ordinal);
+                    var closed = openIndex >= 0 && buffered.IndexOf("</query>", openIndex, StringComparison.Ordinal) >= 0;
+                    if (closed || RosterBuffer.Length > 8 * 1024 * 1024)
+                    {
+                        if (closed)
+                            MainController.HandleRosterContent(buffered);
+                        RosterBuffer.Dispose();
+                        RosterBuffer = null;
+                    }
+                }
+
                 if (!InsertedFakePlayer && content.Contains(roster))
                 {
                     InsertedFakePlayer = true;
                     Trace.WriteLine("<!--SERVER TO RC ORIGINAL-->" + content);
-                    MainController.HandleRosterContent(content);
                     content = content.Insert(content.IndexOf(roster, StringComparison.Ordinal) + roster.Length,
                         "<item jid='41c322a1-b328-495b-a004-5ccd3e45eae8@eu1.pvp.net' name='&#9;Deceive Active!' subscription='both' puuid='41c322a1-b328-495b-a004-5ccd3e45eae8'>" +
                         "<group priority='9999'>Deceive</group>" +
