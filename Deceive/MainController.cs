@@ -64,7 +64,8 @@ internal class MainController : ApplicationContext
     private bool FriendNotificationsEnabled;
     private readonly HashSet<string> TrackedFriends = new(StringComparer.OrdinalIgnoreCase); // normalized "name#tag" Riot IDs
     private readonly Dictionary<string, string> FriendNamesByPuuid = new(); // puuid -> "name#tag"
-    private readonly Dictionary<string, string> FriendLastStatus = new(); // puuid -> last seen human status
+    private readonly Dictionary<string, string> FriendLastStatus = new(); // puuid -> last seen presence status
+    private readonly Dictionary<string, string> FriendRosterState = new(); // puuid -> online/offline from roster (display fallback)
 
     private const string FakePlayerPuuid = "41c322a1-b328-495b-a004-5ccd3e45eae8";
 
@@ -285,14 +286,15 @@ internal class MainController : ApplicationContext
     // hundreds of friends, which would never fit in a context menu.
     private void OpenFriendNotificationsForm()
     {
-        List<string> friends;
+        List<KeyValuePair<string, string>> friends; // "name#tag" -> current status
         HashSet<string> tracked;
         bool enabled;
         lock (FriendLock)
         {
-            friends = FriendNamesByPuuid.Values
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            friends = FriendNamesByPuuid
+                .Select(pair => new KeyValuePair<string, string>(pair.Value, ResolveDisplayStatus(pair.Key)))
+                .GroupBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
                 .ToList();
             tracked = new HashSet<string>(TrackedFriends, StringComparer.OrdinalIgnoreCase);
             enabled = FriendNotificationsEnabled;
@@ -300,6 +302,17 @@ internal class MainController : ApplicationContext
 
         using var form = new FriendNotificationsForm(friends, tracked, enabled, SetFriendNotificationsEnabled, SetFriendTracked);
         form.ShowDialog();
+    }
+
+    // Best-known current status for display: a live presence status if we've seen one this session,
+    // otherwise the online/offline state from the roster. Must be called while holding FriendLock.
+    private string ResolveDisplayStatus(string puuid)
+    {
+        if (FriendLastStatus.TryGetValue(puuid, out var status))
+            return status;
+        if (FriendRosterState.TryGetValue(puuid, out var rosterState))
+            return rosterState;
+        return "Offline";
     }
 
     internal void SetFriendNotificationsEnabled(bool value)
@@ -517,8 +530,14 @@ internal class MainController : ApplicationContext
                 if (riotId is null)
                     continue;
 
+                var state = item.Elements().FirstOrDefault(element => element.Name.LocalName == "state")?.Value;
                 lock (FriendLock)
+                {
                     FriendNamesByPuuid[puuid] = riotId;
+                    if (!string.IsNullOrEmpty(state))
+                        FriendRosterState[puuid] = MapRosterState(state!);
+                }
+
                 count++;
             }
 
@@ -530,6 +549,13 @@ internal class MainController : ApplicationContext
             Trace.WriteLine(e);
         }
     }
+
+    private static string MapRosterState(string state) => state.ToLowerInvariant() switch
+    {
+        "offline" => "Offline",
+        "mobile" => "Mobile",
+        _ => "Online"
+    };
 
     private static string? ExtractRiotId(XElement item)
     {

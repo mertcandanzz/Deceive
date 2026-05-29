@@ -10,7 +10,23 @@ namespace Deceive;
 // window is used instead of a tray submenu because a roster can hold hundreds of friends.
 internal sealed class FriendNotificationsForm : Form
 {
-    private readonly List<string> _allFriends;
+    // One entry in the list: the friend's Riot ID and their current (best-known) status.
+    private sealed class FriendItem
+    {
+        public string RiotId { get; }
+        public string Status { get; }
+        public bool IsOffline => string.Equals(Status, "Offline", StringComparison.OrdinalIgnoreCase);
+
+        public FriendItem(string riotId, string status)
+        {
+            RiotId = riotId;
+            Status = status;
+        }
+
+        public override string ToString() => $"{RiotId}   —   {Status}";
+    }
+
+    private readonly List<FriendItem> _allFriends;
     private readonly HashSet<string> _tracked;
     private readonly Action<string, bool> _setTracked;
     private readonly Action<bool> _setEnabled;
@@ -23,13 +39,13 @@ internal sealed class FriendNotificationsForm : Form
     private bool _populating;
 
     public FriendNotificationsForm(
-        IEnumerable<string> friends,
+        IEnumerable<KeyValuePair<string, string>> friends, // "name#tag" -> current status
         HashSet<string> tracked,
         bool enabled,
         Action<bool> setEnabled,
         Action<string, bool> setTracked)
     {
-        _allFriends = friends.ToList();
+        _allFriends = friends.Select(friend => new FriendItem(friend.Key, friend.Value)).ToList();
         _tracked = tracked;
         _setEnabled = setEnabled;
         _setTracked = setTracked;
@@ -69,23 +85,23 @@ internal sealed class FriendNotificationsForm : Form
 
         var helpLabel = new Label
         {
-            Text = "Checked friends play a sound and show a notification whenever their status changes (e.g. when they finish a game).",
+            Text = "Checked friends play a sound and show a notification whenever their status changes (e.g. when they finish a game). Tracked friends are listed first, offline friends last.",
             Location = new System.Drawing.Point(12, 40),
-            Size = new System.Drawing.Size(356, 36),
+            Size = new System.Drawing.Size(356, 48),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
         };
 
         var searchLabel = new Label
         {
             Text = "Search:",
-            Location = new System.Drawing.Point(12, 84),
+            Location = new System.Drawing.Point(12, 96),
             AutoSize = true,
             Anchor = AnchorStyles.Top | AnchorStyles.Left
         };
 
         _searchBox = new TextBox
         {
-            Location = new System.Drawing.Point(64, 81),
+            Location = new System.Drawing.Point(64, 93),
             Size = new System.Drawing.Size(304, 23),
             Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
             Enabled = enabled
@@ -94,8 +110,8 @@ internal sealed class FriendNotificationsForm : Form
 
         _friendsList = new CheckedListBox
         {
-            Location = new System.Drawing.Point(12, 112),
-            Size = new System.Drawing.Size(356, 320),
+            Location = new System.Drawing.Point(12, 124),
+            Size = new System.Drawing.Size(356, 308),
             Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
             CheckOnClick = true,
             IntegralHeight = false,
@@ -134,11 +150,14 @@ internal sealed class FriendNotificationsForm : Form
         _friendsList.Items.Clear();
 
         var filter = _searchBox.Text.Trim();
-        foreach (var friend in _allFriends)
-        {
-            if (filter.Length == 0 || friend.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0)
-                _friendsList.Items.Add(friend, _tracked.Contains(friend));
-        }
+        var visible = _allFriends
+            .Where(friend => filter.Length == 0 || friend.RiotId.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0)
+            .OrderBy(friend => _tracked.Contains(friend.RiotId) ? 0 : 1) // tracked friends first
+            .ThenBy(friend => friend.IsOffline ? 1 : 0)                  // offline friends last
+            .ThenBy(friend => friend.RiotId, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var friend in visible)
+            _friendsList.Items.Add(friend, _tracked.Contains(friend.RiotId));
 
         _friendsList.EndUpdate();
         _populating = false;
@@ -150,14 +169,14 @@ internal sealed class FriendNotificationsForm : Form
         if (_populating)
             return;
 
-        var friend = (string)_friendsList.Items[e.Index];
+        var friend = (FriendItem)_friendsList.Items[e.Index];
         var nowChecked = e.NewValue == CheckState.Checked;
         if (nowChecked)
-            _tracked.Add(friend);
+            _tracked.Add(friend.RiotId);
         else
-            _tracked.Remove(friend);
+            _tracked.Remove(friend.RiotId);
 
-        _setTracked(friend, nowChecked);
+        _setTracked(friend.RiotId, nowChecked);
 
         // The list's checked state is updated after this event returns, so defer the count refresh.
         BeginInvoke((Action)UpdateCountLabel);
