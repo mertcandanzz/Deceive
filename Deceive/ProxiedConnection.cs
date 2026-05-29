@@ -105,6 +105,7 @@ internal class ProxiedConnection
                 {
                     InsertedFakePlayer = true;
                     Trace.WriteLine("<!--SERVER TO RC ORIGINAL-->" + content);
+                    MainController.HandleRosterContent(content);
                     content = content.Insert(content.IndexOf(roster, StringComparison.Ordinal) + roster.Length,
                         "<item jid='41c322a1-b328-495b-a004-5ccd3e45eae8@eu1.pvp.net' name='&#9;Deceive Active!' subscription='both' puuid='41c322a1-b328-495b-a004-5ccd3e45eae8'>" +
                         "<group priority='9999'>Deceive</group>" +
@@ -122,6 +123,11 @@ internal class ProxiedConnection
                     await Incoming.WriteAsync(bytes, 0, byteCount);
                     Trace.WriteLine("<!--SERVER TO RC-->" + content);
                 }
+
+                // Observe friend presences (for status change notifications) without altering the
+                // forwarded data. Best-effort: malformed/partial chunks are simply ignored.
+                if (content.Contains("<presence"))
+                    MainController.HandleFriendPresenceContent(content);
             } while (byteCount != 0 && Connected);
         }
         catch (Exception e)
