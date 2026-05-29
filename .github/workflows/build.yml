@@ -23,3 +23,10 @@ jobs:
 
       - name: Build solution
         run: msbuild Deceive.sln /p:Configuration=Release
+
+      - name: Upload Deceive.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: Deceive
+          path: Deceive/bin/Release/net472/Deceive.exe
+          if-no-files-found: error
